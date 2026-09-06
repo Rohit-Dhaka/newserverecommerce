@@ -1,213 +1,347 @@
-import { response } from "express";
 import orderModel from "../models/orderModel.js";
 import userModel from "../models/userModel.js";
-import Stripe from 'stripe'
-import Razorpay from 'razorpay';
+import Razorpay from "razorpay";
+import crypto from "crypto";
 
-//gatway initialize
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+
 const razorpayInstance = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_SECRET_KEY,
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-//verify stripe
-const verifyStripe = async (req, res) =>{
-    const { orderId, success, userId } = req.body;
-    try {
-        if(success === 'true'){
-            await orderModel.findByIdAndUpdate(orderId, {payment: true});
-            await userModel.findByIdAndUpdate(userId,{cartData: {}})
-            res.json({success: true})
-        }else{
-            await orderModel.findByIdAndDelete(orderId)
-            response.json({success:false})
-        }
-    } catch (error) {
-        console.log(error);
-        response.json({success: false, message:error.message})
-        
-    }
-}
+const currency = "INR";
 
-//global variablea
-const currency = 'inr'
-const DeliveryCharge = 10 
 
-//placing orders using COD Method
+
 const placeOrder = async (req, res) => {
-
+  try {
     const { userId, items, amount, address } = req.body;
-    try {
-       const orderData = {
-        userId,
-        items,
-        address,
-        amount,
-        paymentMethod: "COD",
-        payment: false,
-        date: Date.now(),
 
+    if (
+      !userId ||
+      !items ||
+      items.length === 0 ||
+      !amount ||
+      !address
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields",
+      });
     }
-    const newOrder = new orderModel(orderData);
-    await newOrder.save();
 
-    await userModel.findByIdAndUpdate(userId, {cartData:{}});
+    const newOrder = await orderModel.create({
+      userId,
+      items,
+      address,
+      amount,
+      paymentMethod: "COD",
+      payment: false,
+      date: Date.now(),
+    });
 
-    res.json({success: true, message:'Order Placed'}) 
+    
+    await userModel.findByIdAndUpdate(userId, {
+      cartData: {},
+    });
 
-    } catch (error) {
-        console.log(error);
-        res.json({success: false, message: error.message})
-        
-    }    
+    return res.json({
+      success: true,
+      message: "Order Placed",
+      orderId: newOrder._id,
+    });
 
-}
+  } catch (error) {
+    console.log("COD ORDER ERROR:", error);
 
-//placing orders using Stripe method
-const placeOrderStripe = async (req, res) => {
-    try {
-        const { userId, items, amount, address } = req.body;
-        const { origin } = req.headers
-        
-        const orderData = {
-            userId,
-            items,
-            address,
-            amount,
-            paymentMethod: "Stripe",
-            payment: false,
-            date: Date.now(),
-        }
-        const newOrder = new orderModel(orderData);
-        await newOrder.save();
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
 
-        const line_items = items.map((item)=>({
-            price_date: {
-                currency: currency,
-                product_data: {
-                    name: item.name
-                },
-                unit_amount: item.price * 100,
 
-            },
-            quantity: item.quantity
-        }))
 
-        line_items.push({
-            price_date: {
-                currency: currency,
-                product_data: {
-                    name: 'Delivery Charges'
-                },
-                unit_amount: DeliveryCharge * 100,
+const placeOrderRazorpay = async (req, res) => {
+  try {
+    const { userId, items, amount, address } = req.body;
 
-            },
-            quantity: 1
-        })
-        const session  = await stripe.checkout.sessions.create({
-            success_url: `${origin}/verify?success=true$orderId=${newOrder._id}`,
-            cancel_url: `${origin}/verify?success=false$orderId=${newOrder._id}`,
-            line_items,
-            mode: 'payment',
-        })
-        res.json({success:true, success_url:session.url})
-    } catch (error) {
-        console.log(error);
-        res.json({success: false, message: error.message});
+    if (
+      !userId ||
+      !items ||
+      items.length === 0 ||
+      !amount ||
+      !address
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields",
+      });
     }
-}
 
-//placing orders using razorpay method
-const placeOrderRazorpay = async (req, res) =>{
-    try {
-       const { userId, items, amount, address } = req.body;
-        const { origin } = req.headers
-        
-        const orderData = {
-            userId,
-            items,
-            address,
-            amount,
-            paymentMethod: "Razorpay",
-            payment: false,
-            date: Date.now(),
-        } 
-        const newOrder = new orderModel(orderData);
-        await newOrder.save();
 
-        const options = {
-            amount : amount * 100,
-            currency: currency.toUpperCase(),
-            receipt : newOrder._id.toString()
-        }
-        
-        await razorpayInstance.orders.create(options, (error, order) => {
-            if (error) {
-                console.log(error);
-                return res.json({ success: false, message: error });
-            } else {
-                res.json({ success: true, order });
-            }
-        })
 
-    } catch (error) {
-        console.log(error);
-        res.json({success: false, message: error.message});
+    const razorpayOrder = await razorpayInstance.orders.create({
+      amount: Math.round(amount * 100),
+      currency: currency,
+      receipt: `receipt_${Date.now()}`,
+    });
+
+
+
+    const newOrder = await orderModel.create({
+      userId,
+      items,
+      address,
+      amount,
+      paymentMethod: "Razorpay",
+      payment: false,
+      razorpayOrderId: razorpayOrder.id,
+      date: Date.now(),
+    });
+
+    return res.json({
+      success: true,
+      order: razorpayOrder,
+      key: process.env.RAZORPAY_KEY_ID,
+      mongoOrderId: newOrder._id,
+    });
+
+  } catch (error) {
+    console.log("RAZORPAY ORDER ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+
+const verifyRazorpay = async (req, res) => {
+  try {
+    const {
+      userId,
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+    } = req.body;
+
+    if (
+      !userId ||
+      !razorpay_order_id ||
+      !razorpay_payment_id ||
+      !razorpay_signature
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing payment data",
+      });
     }
-}
 
-const verifyRazorpay = async (req, res)=>{
-    try {
-        const { userId, razorpay_order_id } = req.body;
-        const orderInfo = await razorpayInstance.orders.fetch(razorpay_order_id);
-        if(orderInfo.status === 'paid'){
-            await orderModel.findByIdAndUpdate(orderId.receipt, {payment: true})
-            await userModel.findByIdAndUpdate(userId, {cartData: {}});
-            res.json({success: true, message: "Payment Successful"})
-        } else{
-            res.json({success: false, message: "Paymetn Failed"})
-        }
-    } catch (error) {
-        console.log(error);
-        res.json({success: false, message: error.message});
+
+
+    const generatedSignature = crypto
+      .createHmac(
+        "sha256",
+        process.env.RAZORPAY_KEY_SECRET
+      )
+      .update(
+        `${razorpay_order_id}|${razorpay_payment_id}`
+      )
+      .digest("hex");
+
+
+
+    const signatureMatch = crypto.timingSafeEqual(
+      Buffer.from(generatedSignature),
+      Buffer.from(razorpay_signature)
+    );
+
+    if (!signatureMatch) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid signature",
+      });
     }
-}
 
-//All orders data for Admin panel
+
+
+    const payment = await razorpayInstance.payments.fetch(
+      razorpay_payment_id
+    );
+
+    if (
+      payment.order_id !== razorpay_order_id ||
+      payment.status !== "captured"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment verification failed",
+      });
+    }
+
+
+
+    const order = await orderModel.findOne({
+      razorpayOrderId: razorpay_order_id,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+
+    if (order.userId.toString() !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized order",
+      });
+    }
+
+
+
+    if (order.payment) {
+      return res.json({
+        success: true,
+        message: "Already verified",
+      });
+    }
+
+   
+
+    if (
+      Math.round(order.amount * 100) !== payment.amount
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount mismatch",
+      });
+    }
+
+ 
+
+    order.payment = true;
+
+    order.razorpayOrderId =
+      razorpay_order_id;
+
+    order.razorpayPaymentId =
+      razorpay_payment_id;
+
+    order.razorpaySignature =
+      razorpay_signature;
+
+    await order.save();
+
+
+
+    await userModel.findByIdAndUpdate(userId, {
+      cartData: {},
+    });
+
+    return res.json({
+      success: true,
+      message: "Payment Successful",
+    });
+
+  } catch (error) {
+    console.log("VERIFY RAZORPAY ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+
 const allOrders = async (req, res) => {
-    try {
-        const orders = await orderModel.find({});
-        res.json({success: true, orders})
-    } catch (error) {
-        console.log(error);
-        res.json({success: false, message: error.message});
-    }
-}
+  try {
+    const orders = await orderModel.find({});
 
-//user orders data for forntend
+    return res.json({
+      success: true,
+      orders,
+    });
+
+  } catch (error) {
+    console.log("ALL ORDERS ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+
 const userOrders = async (req, res) => {
-    try {
-        const { userId } = req.body;
+  try {
+    const { userId } = req.body;
 
-        const orders = await orderModel.find({ userId });
-        res.json({success: true, orders})
-    } catch (error) {
-        console.log(error);
-        res.json({success: false, message: error.message});
-    }
-}
+    const orders = await orderModel.find({
+      userId,
+    });
 
-//update order status from admin panel
+    return res.json({
+      success: true,
+      orders,
+    });
+
+  } catch (error) {
+    console.log("USER ORDERS ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+
 const updateStatus = async (req, res) => {
-    try {
-        const { orderId, status } = req.body;
-        await orderModel.findByIdAndUpdate(orderId, { status })
-        res.json({success: true, message: 'Status Updated'})
-    } catch (error) {
-        console.log(error);
-        res.json({success: false, message: error.message});
-    }
-}
+  try {
+    const { orderId, status } = req.body;
 
-export {verifyRazorpay, verifyStripe, placeOrder, placeOrderRazorpay, placeOrderStripe, allOrders, userOrders, updateStatus}
+    await orderModel.findByIdAndUpdate(
+      orderId,
+      {
+        status,
+      }
+    );
+
+    return res.json({
+      success: true,
+      message: "Status Updated",
+    });
+
+  } catch (error) {
+    console.log("UPDATE STATUS ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+
+export {
+  placeOrder,
+  placeOrderRazorpay,
+  verifyRazorpay,
+  allOrders,
+  userOrders,
+  updateStatus,
+};
